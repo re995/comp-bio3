@@ -1,16 +1,18 @@
-"""
-Created on Sun Jan 23 14:07:18 2022
-@author: richa
-"""
+# Computational Biology Exercise 3
+# SOM for elections
+# The code for drawing hexagons is partially based on https://github.com/rbaltrusch/pygame_examples/tree/master/code/hexagonal_tiles
+# Yair Yariv Yardeni - 315009969
+# Ron Even           - 313260317
 
 from __future__ import annotations
 
 import math
-from collections import Counter, defaultdict
-from colorsys import hls_to_rgb, hsv_to_rgb
-from dataclasses import dataclass
+import sys
+import time
+from collections import defaultdict
+from datetime import datetime
 from functools import lru_cache
-from typing import Optional, List, Set
+from typing import List
 from typing import Tuple
 
 import attr
@@ -24,12 +26,20 @@ from matplotlib.ticker import AutoLocator
 from scipy.stats import zscore
 from numba import njit
 
+
 MAX_EPOCHS = 50
 
 FIELDS_COUNT = 14
 GRID_SIZE = 9
 GRID_ROW_SIZES = [5, 6, 7, 8, 9, 8, 7, 6, 5]
-GENERAL_BORDER_COLOR = (0, 0, 0)
+
+BLACK_RGB = (0, 0, 0)
+WHITE_RGB = (255, 255, 255)
+
+GENERAL_BORDER_COLOR = BLACK_RGB
+FONT = None
+SMALL_FONT = None
+
 
 LEARNING_RATE = 0.3
 NEIGHBOURHOOD_UPDATES = {
@@ -42,26 +52,28 @@ NEIGHBOURHOOD_UPDATES = {
 @attr.s(hash=False)
 class HexagonTile:
     """Hexagon class"""
-
     radius = attr.ib(type=float)
     position = attr.ib(type=Tuple[float, float])
-    highlight_offset = attr.ib(type=int, default=3)
-    max_highlight_ticks = attr.ib(type=int, default=15)
+    highlight_offset = attr.ib(type=int, default=30)
+    max_highlight_ticks = attr.ib(type=int, default=5)
 
     def __attrs_post_init__(self):
         self.vertices = self.compute_vertices()
         self.highlight_tick = 0
         self.data = None
         self.linked_data = None
-        average_economic_cluster = -1
 
-    def update(self, linked_data):
+    def update_linked_data(self, linked_data):
+        """
+        Updates linked data to the current hexagon
+        """
+        self.linked_data = linked_data
+        self.average_economic_cluster = np.average([d['Economic Cluster'] for d in self.linked_data]) if self.linked_data else -1
+
+    def update(self):
         """Updates tile highlights"""
         if self.highlight_tick > 0:
             self.highlight_tick -= 1
-
-        self.linked_data = linked_data
-        self.average_economic_cluster = np.average([d['Economic Cluster'] for d in self.linked_data]) if self.linked_data else -1
 
     def compute_vertices(self) -> List[Tuple[float, float]]:
         """Returns a list of the hexagon's vertices as x, y tuples"""
@@ -78,18 +90,21 @@ class HexagonTile:
             (x + minimal_radius, y + half_radius),
         ]
 
-    def _compute_single_level_neighbours(self, hexagons: List[HexagonTile]) -> List[HexagonTile]:
-        # could cache results for performance
+    def _compute_immediate_neighbours(self, hexagons: List[HexagonTile]) -> List[HexagonTile]:
+        """
+        Returns a list of immediate neighbours of this hexagon
+        """
         return [hexagon for hexagon in hexagons if self.is_neighbour(hexagon)]
 
-    def compute_neighbours(self, hexagons: List[HexagonTile], distance) -> List[HexagonTile]:
-        # could cache results for performance
-
-        prev_neighbours = self._compute_single_level_neighbours(hexagons)
-        for i in range(distance - 1):
+    def compute_neighbours(self, hexagons: List[HexagonTile], level) -> List[HexagonTile]:
+        """
+        Returns all neighbors of this hexagon in given level
+        """
+        prev_neighbours = self._compute_immediate_neighbours(hexagons)
+        for i in range(level - 1):
             new_neighbours = []
             for prev_neighbour in prev_neighbours:
-                new_neighbours += prev_neighbour._compute_single_level_neighbours(hexagons)
+                new_neighbours += prev_neighbour._compute_immediate_neighbours(hexagons)
 
             new_neighbours = [x for x in new_neighbours if x not in prev_neighbours]
             prev_neighbours = new_neighbours
@@ -97,63 +112,78 @@ class HexagonTile:
         return list(prev_neighbours)
 
     def collide_with_point(self, point: Tuple[float, float]) -> bool:
-        """Returns True if distance from center to point is less than horizontal_length"""
+        """
+        Returns True if distance from center to point is less than horizontal_length
+        """
         return math.dist(point, self.center) < self.minimal_radius
 
     @lru_cache(maxsize=8192)
     def is_neighbour(self, hexagon: HexagonTile) -> bool:
-        """Returns True if hexagon center is approximately
+        """
+        Returns True if hexagon center is approximately
         2 minimal radiuses away from own center
         """
         distance = math.dist(hexagon.center, self.center)
         return math.isclose(distance, 2 * self.minimal_radius, rel_tol=0.1) and hexagon.data is not None
 
     def render(self, screen) -> None:
-        """Renders the hexagon on the screen"""
+        """
+        Renders the hexagon on the screen
+        """
         pygame.draw.polygon(screen, self.highlight_color, self.vertices)
         pygame.draw.aalines(screen, GENERAL_BORDER_COLOR, closed=True, points=self.vertices)
 
         if self.linked_data:
-            font = pygame.font.SysFont("arial", 24, bold=True)
-            text_surface = font.render(f"{self.average_economic_cluster:.2f}", True, (0, 0, 0))
-            screen.blit(text_surface, np.subtract(self.center, (15, 15)))
-            # TODO: Centre text
+            text_surface = FONT.render(f"{self.average_economic_cluster:.2f}", True, BLACK_RGB)
+            screen.blit(text_surface, np.subtract(self.center, (21.0675, 13.3)))
 
     def render_highlight(self, screen, border_color) -> None:
-        """Draws a border around the hexagon with the specified color"""
+        """
+        Draws a border around the hexagon with the specified color
+        """
         self.highlight_tick = self.max_highlight_ticks
         # pygame.draw.polygon(screen, self.highlight_color, self.vertices)
         pygame.draw.aalines(screen, border_color, closed=True, points=self.vertices)
 
     @property
     def center(self) -> Tuple[float, float]:
-        """Centre of the hexagon"""
-        x, y = self.position  # pylint: disable=invalid-name
-        return (x, y + self.radius)
+        """
+        Center of the hexagon
+        """
+        x, y = self.position
+        return x, y + self.radius
 
     @property
     def minimal_radius(self) -> float:
-        """Horizontal length of the hexagon"""
+        """
+        Horizontal length of the hexagon
+        """
         # https://en.wikipedia.org/wiki/Hexagon#Parameters
         return self.radius * math.cos(math.radians(30))
 
     @property
     def highlight_color(self) -> Tuple[int, ...]:
-        """color of the hexagon tile when rendering highlight"""
+        """
+        Color of the hexagon tile when rendering highlight
+        """
         offset = self.highlight_offset * self.highlight_tick
         brighten = lambda x, y: x + y if x + y < 255 else 255
-        # TODO: Brighten
-        brighten = lambda x, y: x
 
         return tuple(brighten(x, offset) for x in self.color)
 
     @property
     def color(self) -> Tuple[int, ...]:
+        """
+        Returns the color of the hexagon.
+        If the hexagon has no data (is a padding hexagon) the color is black (the same as the background).
+        If the hexagon has no linked data (i.e no municipalities linked to it), the color is white.
+        Otherwise, the color is chosen from a range, according to the average linked municipalities economic cluster.
+        """
         if self.data is None:
-            return (0, 0, 0)
+            return BLACK_RGB
 
         if not self.linked_data:
-            return (255, 255, 255)
+            return WHITE_RGB
 
         palette = list(colour.Color("red").range_to(colour.Color("blue"), 11))
         value = self.average_economic_cluster
@@ -161,24 +191,15 @@ class HexagonTile:
 
         return (color[0] * 255, color[1] * 255, color[2] * 255)
 
-        value = (value, 0.8, 0.8)
-
-        rgb = hsv_to_rgb(*value)
-
-        return (rgb[0] * 255, rgb[1] * 255, rgb[2] * 255)
-
-        return (0, 255 / np.average([d["Economic Cluster"] for d in self.linked_data]), 0)
-
-        return (0, 0, 0) if self.data is None else (0, 255 * self.data[0], 0)
-
-
     def __hash__(self):
         return self.position.__hash__()
 
 
 class FlatTopHexagonTile(HexagonTile):
     def compute_vertices(self) -> List[Tuple[float, float]]:
-        """Returns a list of the hexagon's vertices as x, y tuples"""
+        """
+        Returns a list of the hexagon's vertices as x, y tuples
+        """
         # pylint: disable=invalid-name
         x, y = self.position
         half_radius = self.radius / 2
@@ -194,21 +215,27 @@ class FlatTopHexagonTile(HexagonTile):
 
     @property
     def center(self) -> Tuple[float, float]:
-        """Centre of the hexagon"""
+        """
+        Centre of the hexagon
+        """
         x, y = self.position  # pylint: disable=invalid-name
         return (x, y + self.minimal_radius)
 
 
 def create_hexagon(position, radius=50, flat_top=False) -> HexagonTile:
-    """Creates a hexagon tile at the specified position"""
+    """
+    Creates a hexagon tile at the specified position
+    """
     class_ = FlatTopHexagonTile if flat_top else HexagonTile
     return class_(radius, position)
 
 
 def init_hexagons(num_x=8, num_y=9, flat_top=False) -> List[HexagonTile]:
-    """Creates a hexaogonal tile map of size num_x * num_y"""
+    """
+    Creates a hexaogonal tile map of size num_x * num_y
+    """
     # pylint: disable=invalid-name
-    leftmost_hexagon = create_hexagon(position=(150, 150), flat_top=flat_top)
+    leftmost_hexagon = create_hexagon(position=(150, 200), flat_top=flat_top)
     hexagons = [leftmost_hexagon]
     for x in range(num_y):
         if x:
@@ -236,44 +263,49 @@ def init_hexagons(num_x=8, num_y=9, flat_top=False) -> List[HexagonTile]:
 
 
 def render_multi_line(screen, font, color, text, x, y, fsize):
+    """
+    Renders multi-line text on the pygame screen
+    """
     lines = text.splitlines()
     for i, l in enumerate(lines):
         screen.blit(font.render(l, 0, color), (x, y + fsize * i))
 
 
 def render(screen, hexagons, quantization_error, topological_error, economic_std, epoch):
-    """Renders hexagons on the screen"""
-    screen.fill((0, 0, 0))
+    """
+    Renders hexagons on the screen
+    """
+    screen.fill(BLACK_RGB)
     for hexagon in hexagons:
+        hexagon.update()
         hexagon.render(screen)
 
-    font = pygame.font.SysFont("arial", 24)
-    small_font = pygame.font.SysFont("arial", 20)
-
-    render_multi_line(screen, font, (255, 255, 255),
+    render_multi_line(screen, FONT, WHITE_RGB,
                                f"Epoch : {epoch}\n"
                                f"Quantization error : {quantization_error:.2f}\n"
                                f"Topological error : {topological_error:.2f}\n"
                                f"Economic Cluster STD : {economic_std:.2f}",
                       50, 50, 24)
 
-    # # draw borders around colliding hexagons and neighbours
-    # TODO: Make it sparkle
+    # draw borders around colliding hexagons and neighbours
     mouse_pos = pygame.mouse.get_pos()
     colliding_hexagons = [
         hexagon for hexagon in hexagons if hexagon.collide_with_point(mouse_pos)
     ]
 
     for hexagon in colliding_hexagons:
-        hexagon.render_highlight(screen, border_color=(255, 0, 0))
+        hexagon.render_highlight(screen, border_color=BLACK_RGB)
         municipalities = [f'({d["Economic Cluster"].values[0]}) {d["Municipality"].values[0]}' for d in hexagon.linked_data]
-        render_multi_line(screen, small_font, (255, 255, 255), "\n".join(municipalities), 1200 - 300, 50, 20)
-
+        render_multi_line(screen, SMALL_FONT, (255, 255, 255), "\n".join(municipalities), 1200 - 300, 50, 20)
 
     pygame.display.flip()
 
 
 def init_grid_cells_data():
+    """
+    Initializes the grid random data according to the needed pattern.
+    Cells that do not exist in the grid, will be represented as None
+    """
     result = []
     for i in range(GRID_SIZE):
         current_row_size = GRID_ROW_SIZES[i]
@@ -287,31 +319,27 @@ def init_grid_cells_data():
 
     return result
 
+
 @njit
 def distance(data1, data2):
+    """
+    RMS distance function. njit decorator used for optimization (by pre-compiling it)
+    """
     return np.sqrt(np.mean(np.square(data1 - data2)))
 
 
 def _find_k_cells_with_min_distance(data_item, hexagons, k=1) -> List[HexagonTile]:
+    """
+    Returns a list of neighbours with the k closest hexagons to the given data item
+    """
     sorted_hexagons = sorted(hexagons, key=lambda h: distance(h.data, data_item))
     return sorted_hexagons[:k]
 
 
-    min_distance, min_distance_hexagon = math.inf, None
-    for hexagon in hexagons:
-        # Find the hexagon with the least values
-        curr_distance = distance(hexagon.data, data_item)
-
-
-
-        min_distance = min(min_distance, curr_distance)
-        if curr_distance == min_distance:
-            min_distance_hexagon = hexagon
-
-    return min_distance_hexagon
-
-
 def _update_hexagons(data_item, center_hexagon: HexagonTile, hexagons):
+    """
+    Runs an update iteration on with the given data item on the given center hexagon and its surroundings
+    """
     first_neighbours = center_hexagon.compute_neighbours(hexagons, 1)
     second_neighbours = center_hexagon.compute_neighbours(hexagons, 2)
     levels = [[center_hexagon], first_neighbours, second_neighbours]
@@ -319,45 +347,41 @@ def _update_hexagons(data_item, center_hexagon: HexagonTile, hexagons):
     for level, hexagons in enumerate(levels):
         for hexagon in hexagons:
             hexagon.data += LEARNING_RATE * NEIGHBOURHOOD_UPDATES[level] * (data_item - hexagon.data)
-            #hexagon.data = (1 - LEARNING_RATE) * hexagon.data +  LEARNING_RATE * NEIGHBOURHOOD_UPDATES[level] * (data_item - hexagon.data)
 
 
 def run_som_epoch(data_set, hexagons):
-    # np.random.shuffle(data_set)
+    """
+    Runs a single SOM epoch
+    """
     for data_item in data_set:
         nearest_hexagon = _find_k_cells_with_min_distance(data_item, hexagons)[0]
         _update_hexagons(data_item, nearest_hexagon, hexagons)
-        # print(list(map(lambda x: x.data, hexagons)))
 
 
-def run_som_algorithm(data_set, hexagons, epoch_count):
+def run_som_algorithm(data, raw_data, hexagons, epoch_count):
+    """
+    Runs epoch_count SOM epochs, eventually printing the error values.
+    """
+    global QUANTIZATION_ERRORS
+    global TOPOLOGICAL_ERRORS
+    global ECONOMIC_STDS
+
+    QUANTIZATION_ERRORS = []
+    TOPOLOGICAL_ERRORS = []
+    ECONOMIC_STDS = []
+
     for epoch in range(epoch_count):
         print(f"\rEpoch {epoch}/{epoch_count}", end='')
-        
-        run_som_epoch(data_set, hexagons)
+        run_som_epoch(raw_data, hexagons)
+
+    quantization_error, topological_error, _ = do_after_epoch_update(data, raw_data, hexagons)
+    print("\rDone!")
+    print_errors(quantization_error, topological_error)
 
 
 def read_data(path):
     df = pd.read_csv(path)
     return df
-
-    data = np.genfromtxt(path, delimiter=',')[1:]  # Skip header line
-
-    data_items = {}
-
-
-    # Normalize economic cluster and votes counts
-    for item in data:
-        total_votes = sum(item[3:])
-        for i in range(3, item.shape[0]):
-            item[i] /= total_votes
-
-        item[1] /= 10.0
-
-    for item in data:
-        data_items[item[0]] = np.array([item[1]] + list(item[3:]))
-
-    return data_items
 
 QUANTIZATION_ERRORS = []
 TOPOLOGICAL_ERRORS = []
@@ -391,6 +415,8 @@ def show_graph():
         epoch = max(len(quantization_errors), len(topological_errors), len(economic_stds))
 
         plt.suptitle(f"Epoch {epoch}")
+        plt.legend(loc="upper right")
+
         if epoch >= MAX_EPOCHS:
             # No more sick cells. Stop simulation
             ani.pause()
@@ -410,36 +436,91 @@ def show_graph():
     ani = animation.FuncAnimation(fig, update, interval=1)
     plt.show(block=False)
 
-def main():
-    """Main function"""
 
+def do_after_epoch_update(data, raw_data, hexagons):
+    """
+    Updates the linked municipalities and the errors after an epoch is complete
+    """
+    topological_error = 0
+    data_links = defaultdict(list)
+    for i, row in enumerate(raw_data):
+        min_distance_hexagons = _find_k_cells_with_min_distance(row, hexagons, k=2)
+        nearest_hexagon = min_distance_hexagons[0]
+        data_links[nearest_hexagon].append(data.iloc[[i]])
+
+        second_nearest_hexagon = min_distance_hexagons[1]
+        topological_error += distance(nearest_hexagon.data, second_nearest_hexagon.data)
+
+    quantization_error = 0
+    economic_std = 0
+    economic_std_div = 0
+
+    for hexagon in hexagons:
+        links = data_links.get(hexagon, [])
+        hexagon.update_linked_data(links)
+
+        raw_links = [raw_data[l.index.values[0]] for l in links]
+
+        if raw_links:
+            economic_std += np.std(np.array(raw_links)[:, 0])
+            economic_std_div += 1
+
+        for link in raw_links:
+            quantization_error += distance(link, hexagon.data)
+
+    topological_error /= len(data)
+    quantization_error /= len(data)
+    economic_std /= economic_std_div
+
+    return quantization_error, topological_error, economic_std
+
+
+def print_errors(quantization_error, topological_error):
+    print(f"Quantization error : {quantization_error}")
+    print(f"Topological error  : {topological_error}")
+
+
+def init_hexagons_for_som():
+    hexagons = init_hexagons(flat_top=False)
+    grid_cells_data = init_grid_cells_data()
+    for i, hexagon in enumerate(hexagons):
+        x, y = np.unravel_index(i, (GRID_SIZE, GRID_SIZE))
+        hexagon.data = grid_cells_data[x][y]
+    # Remove all hexagons that are irrelevant (that form a full grid)
+    hexagons = [h for h in hexagons if h.data is not None]
+    return hexagons
+
+
+def main():
+    data_path = sys.argv[1]
+
+    global FONT
+    global SMALL_FONT
+
+    # Force compiling distance function before rendering
     distance(np.arange(5), np.arange(5))
 
     show_graph()
 
     pygame.init()
-    screen = pygame.display.set_mode((1200, 1200))
+
+    FONT = pygame.font.SysFont("arial", 24, bold=True)
+    SMALL_FONT = pygame.font.SysFont("arial", 20)
+
+    screen = pygame.display.set_mode((1200, 1000))
     clock = pygame.time.Clock()
-    hexagons = init_hexagons(flat_top=False)
+    hexagons = init_hexagons_for_som()
 
-    grid_cells_data = init_grid_cells_data()
-
-    for i, hexagon in enumerate(hexagons):
-        x, y = np.unravel_index(i, (GRID_SIZE, GRID_SIZE))
-        hexagon.data = grid_cells_data[x][y]
-
-    # Remove all hexagons that are irrelevant (that form a full grid)
-    hexagons = [h for h in hexagons if h.data is not None]
-
-    data = read_data("/Users/rone/Downloads/Elec_24.csv")
+    data = read_data(data_path)
 
     numeric_columns = data.select_dtypes(include=[np.number]).columns
     raw_data = pd.DataFrame.copy(data)
+    # Normalize the data with z-score
     raw_data[numeric_columns] = raw_data[numeric_columns].apply(zscore)
-
     raw_data = raw_data.drop(columns=["Municipality", "Economic Cluster"], axis=1).to_numpy()
 
     terminated = False
+    printed_stats = False
     epoch = 0
     while not terminated:
 
@@ -451,45 +532,28 @@ def main():
 
             run_som_epoch(raw_data, hexagons)
             epoch += 1
-            topological_error = 0
+            quantization_error, topological_error, economic_std = do_after_epoch_update(data, raw_data, hexagons)
 
-            data_links = defaultdict(list)
-            for i, row in enumerate(raw_data):
-                min_distance_hexagons = _find_k_cells_with_min_distance(row, hexagons, k=2)
-                nearest_hexagon = min_distance_hexagons[0]
-                data_links[nearest_hexagon].append(data.iloc[[i]])
+            QUANTIZATION_ERRORS.append(quantization_error)
+            TOPOLOGICAL_ERRORS.append(topological_error)
+            ECONOMIC_STDS.append(economic_std)
+        elif not printed_stats:
+            print_errors(QUANTIZATION_ERRORS[-1], TOPOLOGICAL_ERRORS[-1])
+            print("Hexagons and mapped municipalities (ordered from top left to right):")
+            for i, hexagon in enumerate(hexagons):
+                print(f"Hexagon {i}: {', '.join([m['Municipality'].values[0] for m in hexagon.linked_data]) if len(hexagon.linked_data) else 'None'}")
 
-                second_nearest_hexagon = min_distance_hexagons[1]
-                topological_error += distance(nearest_hexagon.data, second_nearest_hexagon.data)
+            time.sleep(0.5)
+            output_base = str(datetime.now().strftime('%Y-%m-%d-%H-%M-%S'))
 
-            quantization_error = 0
+            pygame.image.save(screen, f"{output_base}_map.jpg")
+            plt.savefig(f"{output_base}_plots.jpg")
 
-            economic_std = 0
-            economic_std_div = 0
+            printed_stats = True
 
-            for hexagon in hexagons:
-                links = data_links.get(hexagon, [])
-                hexagon.update(links)
+        render(screen, hexagons, QUANTIZATION_ERRORS[-1], TOPOLOGICAL_ERRORS[-1], ECONOMIC_STDS[-1], epoch)
+        clock.tick(30)
 
-                raw_links = [raw_data[l.index.values[0]] for l in links]
-
-                if raw_links:
-                    economic_std += np.std(np.array(raw_links)[:, 0])
-                    economic_std_div += 1
-
-                for link in raw_links:
-                    quantization_error += distance(link, hexagon.data)
-
-            topological_error /= len(data)
-            quantization_error /= len(data)
-            economic_std /= economic_std_div
-
-        QUANTIZATION_ERRORS.append(quantization_error)
-        TOPOLOGICAL_ERRORS.append(topological_error)
-        ECONOMIC_STDS.append(economic_std)
-
-        render(screen, hexagons, quantization_error, topological_error, economic_std, epoch)
-        clock.tick(10)
     pygame.display.quit()
 
 

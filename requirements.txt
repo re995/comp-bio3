@@ -3,3 +3,6 @@ pandas
 scipy
 colour
 numba
+matplotlib
+numpy
+pygame
