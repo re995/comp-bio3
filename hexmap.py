@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import math
+import pathlib
 import sys
 import time
 from collections import defaultdict
@@ -381,6 +382,17 @@ def run_som_algorithm(data, raw_data, hexagons, epoch_count):
 
 def read_data(path):
     df = pd.read_csv(path)
+
+    # Normalize economic cluster and votes counts
+    for row_index, row in enumerate(df.values):
+        all_votes = int(row[2])
+        all_valid_votes = sum(row[3:])
+        invalid_votes = all_votes - all_valid_votes
+        df.iloc[row_index, 2] = (invalid_votes / all_votes) * 100  # Calculate invalid votes
+        for i in range(3, row.shape[0]):
+            df.iloc[row_index, i] = (df.iloc[row_index, i] / all_votes) * 100
+
+    df = df.rename(columns={"Total Votes": "Invalid votes"})
     return df
 
 QUANTIZATION_ERRORS = []
@@ -449,7 +461,7 @@ def do_after_epoch_update(data, raw_data, hexagons):
         data_links[nearest_hexagon].append(data.iloc[[i]])
 
         second_nearest_hexagon = min_distance_hexagons[1]
-        topological_error += distance(nearest_hexagon.data, second_nearest_hexagon.data)
+        topological_error += int(not second_nearest_hexagon.is_neighbour(nearest_hexagon))
 
     quantization_error = 0
     economic_std = 0
@@ -513,10 +525,7 @@ def main():
 
     data = read_data(data_path)
 
-    numeric_columns = data.select_dtypes(include=[np.number]).columns
     raw_data = pd.DataFrame.copy(data)
-    # Normalize the data with z-score
-    raw_data[numeric_columns] = raw_data[numeric_columns].apply(zscore)
     raw_data = raw_data.drop(columns=["Municipality", "Economic Cluster"], axis=1).to_numpy()
 
     terminated = False
@@ -537,17 +546,21 @@ def main():
             QUANTIZATION_ERRORS.append(quantization_error)
             TOPOLOGICAL_ERRORS.append(topological_error)
             ECONOMIC_STDS.append(economic_std)
+
         elif not printed_stats:
             print_errors(QUANTIZATION_ERRORS[-1], TOPOLOGICAL_ERRORS[-1])
-            print("Hexagons and mapped municipalities (ordered from top left to right):")
+            output_text = "Hexagons and mapped municipalities (ordered from top left to right):\n"
             for i, hexagon in enumerate(hexagons):
-                print(f"Hexagon {i}: {', '.join([m['Municipality'].values[0] for m in hexagon.linked_data]) if len(hexagon.linked_data) else 'None'}")
+                output_text += f"Hexagon {i}: {', '.join([m['Municipality'].values[0] for m in hexagon.linked_data]) if len(hexagon.linked_data) else 'None'}\n"
 
-            time.sleep(0.5)
+            print(output_text)
+
+            time.sleep(1)
             output_base = str(datetime.now().strftime('%Y-%m-%d-%H-%M-%S'))
 
             pygame.image.save(screen, f"{output_base}_map.jpg")
             plt.savefig(f"{output_base}_plots.jpg")
+            pathlib.Path(f"{output_base}_results.txt").write_text(output_text)
 
             printed_stats = True
 
